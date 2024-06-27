@@ -1,0 +1,1068 @@
+---
+title: "確率統計学"
+author: "Koji Ikeda"
+date: "2020/4/1"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+    toc: true
+    number_sections: true
+documentclass: bxjsarticle
+classoption: xelatex,ja=standard
+---
+
+```{r include=FALSE}
+library(tidyverse)
+library(plotly)
+library(rgl)
+library(torch)
+library(matrixcalc)
+library(MASS)
+library(gganimate)
+library(imager)
+
+setwd("C:/Users/kojii/OneDrive/05-自己研鑽/ゼロから作るDL5")
+```
+
+# はじめに
+
+本稿では、ゼロから作るDeep Learning 5のpythonプログラムをRプログラムで再現を試みる。
+
+# 第一章
+
+これでうまくいっているかテスト。
+
+なんかうまくいってないみたいだが。。。
+
+## 正規分布のコード
+
+```{r echo=TRUE}
+normal = function(x, mu=0, sigma = 1)
+{
+  y = 1/sqrt(2*pi*sigma)*exp(-0.5*(x-mu)^2/sigma)
+  return(y)
+}
+
+x = seq(-5,5,0.01)
+y = normal(x)
+
+ggplot() + geom_line(aes(x=x,y=y))
+```
+
+## パラメータの役割
+
+```{r}
+x = seq(-10,10,0.01)
+y0 = normal(x, mu=-3)
+y1 = normal(x, mu=0)
+y2 = normal(x, mu=5)
+
+plot_dat = bind_cols(x,y0,y1,y2)
+names(plot_dat) = c("x", "mu=-3", "mu=0", "mu=5")
+
+ggplot(plot_dat) + aes(x=x) + 
+  geom_line(aes(y = !!as.name('mu=-3'), colour = 'mu=-3')) +
+  geom_line(aes(y = !!as.name('mu=0'), colour = 'mu=0')) +
+  geom_line(aes(y = !!as.name('mu=5'), colour = 'mu=5')) +
+  labs(x = "x", y = "y")
+```
+
+```{r}
+x = seq(-10,10,0.01)
+y0 = normal(x, sigma=0.5^2)
+y1 = normal(x, sigma=1^2)
+y2 = normal(x, sigma=2^2)
+
+plot_dat = bind_cols(x,y0,y1,y2)
+names(plot_dat) = c("x", "sigma=0.5", "sigma=1", "sigma=2")
+
+ggplot(plot_dat) + aes(x=x) + 
+  geom_line(aes(y = !!as.name('sigma=0.5'), colour = 'sigma=0.5')) +
+  geom_line(aes(y = !!as.name('sigma=1'), colour = 'sigma=1')) +
+  geom_line(aes(y = !!as.name('sigma=2'), colour = 'sigma=2')) +
+  labs(x = "x", y = "y")
+
+```
+
+## 中心極限定理の実験
+
+```{r}
+N = 3
+xs = c()
+for(n in 1:N) 
+{
+  x = runif(1)
+  xs = c(xs,x)
+}
+
+x.mean = mean(xs)
+print(x.mean)
+```
+
+```{r}
+x_mean = c()
+N = 10 #任意の数字に設定してください。
+
+for(iter1 in 1:10000)
+{
+  xs = c()
+  for(iter2 in 1:N)
+  {
+    x = runif(1)
+    xs = c(xs,x)
+  }
+  x.mean = mean(xs)
+  x_mean = c(x_mean,x.mean)
+}
+
+ggplot() + geom_histogram(aes(x = x_mean, y = ..density..),bins = 100) + 
+  labs(title = paste0("N=",N),x = "x", y = "probability Density") +
+  theme(plot.title = element_text(hjust = 0.5 ))
+```
+
+```{r}
+x_sum = c()
+N = 10 #任意の数字に設定してください。
+
+for(iter1 in 1:10000)
+{
+  xs = c()
+  for(iter2 in 1:N)
+  {
+    x = runif(1)
+    xs = c(xs,x)
+  }
+  x.sum = sum(xs)
+  x_sum = c(x_sum,x.sum)
+}
+
+x_norm = seq(0,10,0.01)
+x_norm_density = normal(x_norm,mu = N/2, sigma = N/12)
+
+ggplot() + 
+  geom_histogram(aes(x = x_sum, y = ..density..),bins = 100) + 
+  geom_line(aes(x = x_norm, y = x_norm_density), colour = "red", linewidth = 1) +
+  labs(title = paste0("N=",N),x = "x", y = "probability Density") +
+  theme(plot.title = element_text(hjust = 0.5 )) +
+  xlim(c(0,10)) + ylim(c(0,0.5))
+
+```
+
+# STEP2
+
+この節では最尤推定について紹介します。 ここから生成モデルの基礎に入っていきます。生成モデルは、手元にあるデータがある確率分布から得られたサンプルと考えるモデルと言えるかと思います。問題はその確率分布がどのような形状をしており、そのパラメータをどのように求めれば良いかです。
+
+まず確率分布に関しては前回触れた正規分布を仮定していきましょう。 後半の章で紹介しますが、正規分布は複数組み合わせることで柔軟なモデリングが可能となります。 ここではまず1つの正規分布を仮定して、そのパラメータを推定していきます。その際使用する手法が最尤推定法になります。
+
+```{r}
+xs = read_tsv("./data/height.txt",col_names = FALSE)
+print(dim(xs))
+
+ggplot(xs) + geom_histogram(aes(x = X1, y = ..density..), bins = 100) +
+  labs(x = "Height(cm)", y = "Probability Density")
+
+```
+
+正規分布の最尤推定の結果はデータのサンプル平均とサンプル分散と一致することが知られています。 データのサンプル平均とサンプル分散は以下のように求められます。
+
+```{r}
+xs = unlist(xs) #tibble形式からベクトル
+mu = mean(xs)
+sigma = var(xs)
+
+print(mu)
+print(sigma)
+```
+
+求められた平均と分散を正規分布に当てはめて先ほどのヒストグラムと重ねてみます。
+
+```{r}
+x_norm = seq(150,200,0.01)
+x_norm_density = normal(x_norm,mu = mu, sigma = sigma)
+
+ggplot() + 
+  geom_histogram(aes(x = xs, y = ..density..),bins = 100) + 
+  geom_line(aes(x = x_norm, y = x_norm_density), colour = "red", linewidth = 1) +
+  labs(x = "x", y = "probability Density")
+```
+
+このようにサンプル平均とサンプル分散をそのまま正規分布の平均と分散にインプットした確率密度関数とデータのヒストグラムはほぼ同じ形状をしていることがわかります。
+
+では次に正規分布の平均と分散を最尤推定法を使って推定していきます。
+
+生成モデルはその名の通り、モデルからサンプルを生成することができます。より複雑な生成モデルでは画像を生成することもできるようになります。ここでは、推定した平均と分散を持つ1次元の正規分布からサンプリングしてみます。
+
+```{r}
+x_norm_generated = rnorm(10000,mean = mu, sd = sqrt(sigma))
+
+ggplot() + 
+  geom_histogram(aes(x = xs, y = ..density.., colour = "original"),bins = 100) + 
+  geom_histogram(aes(x = x_norm_generated, y = ..density.., colour = "generated"), bins = 100, alpha = 0.5) +
+  labs(x = "x", y = "probability Density")
+
+```
+
+このグラフは推定したパラメータを持つ正規分布から生成したデータと元々のデータのヒストグラムになります。生成されたデータと元々のデータはほぼ一致しているように見えます。ここから推定したパラメータを持つ正規分布はデータの特徴を上手く捉えられていると考えられます。
+
+分布がわかればある値がどの程度の確率を得られるかを求めることもできます。 その計算には累積分布関数を用いる必要があります。以下そのRコードになります。
+
+```{r}
+p1 = pnorm(160, mu, sqrt(sigma))
+print(paste0("p(x<=160) = ",p1))
+
+p2 = pnorm(180, mu, sqrt(sigma))
+print(paste0("p(x>180) = ",1-p2))
+
+```
+
+```{r}
+multivariate_normal = function(x, mu, cov)
+{
+  determ = det(cov)
+  inv = solve(cov)
+  D = nrow(cov)
+  z = 1 / sqrt((2*pi)^D*determ)
+  y = z * exp(t(x-mu) %*% inv %*% (x-mu) / -2.0)
+  return(y)
+}
+
+```
+
+```{r}
+mu = c(0.5,-0.2)
+cov_mat = matrix(c(2.0,0.3,0.3,0.5),nrow = 2, ncol = 2)
+x = seq(-3,3,0.01)
+y = seq(-3,3,0.01)
+tmp = meshgrid(x)
+dat = bind_cols(vec(tmp$X),vec(tmp$Y))
+z = apply(dat,1,multivariate_normal,mu = mu, cov = cov_mat)
+dat = bind_cols(dat,z)
+names(dat) = c("x", "y", "z")
+plot_ly(x = dat$x, y = dat$y, z = dat$z,colorscale = "Viridis",color = ~dat$z)
+```
+
+```{r}
+xs = read_tsv("./data/height_weight.txt",col_names = FALSE)
+xs = xs %>% separate(X1, c("height", "weight"), sep=" ") %>% mutate_if(is.character, as.double)
+print(dim(xs))
+
+ggplot(xs) + geom_point(aes(x = weight, y = height)) +
+  labs(x = "weight(kg)", y = "height(cm)")
+```
+
+```{r}
+x_mean = apply(xs,2,mean)
+x_cov = cov(xs)
+
+print(x_mean)
+print(x_cov)
+```
+
+```{r}
+mus = list()
+sigmas = list()
+mus[[1]] = c(2.0, 54.5)
+mus[[2]] = c(4.3, 80.0)
+sigmas[[1]] = matrix(c(0.07,0.44,0.44,33.7), nrow = 2, ncol = 2)
+sigmas[[2]] = matrix(c(0.17,0.94,0.94,36.0), nrow = 2, ncol = 2)
+prob = 0.35
+
+GMM_sample = function(N,mus,sigmas,prob)
+{
+  choice = rbinom(n = N,size = 1,prob = prob) #二項分布のサイズを1にすることでベルヌーイ分布からのサンプリングとする
+  x_random = c()
+  for(i in 1:N)
+  {
+    mu = mus[[choice[i]+1]]
+    sigma = sigmas[[choice[i]+1]]
+    x = mvrnorm(n = 1, mu = mu, Sigma = sigma)
+    x_random = rbind(x_random,x)
+  }
+  return(x_random)
+}
+
+dat = GMM_sample(N = 25000,mus = mus,sigmas = sigmas,prob = prob)
+
+ggplot() + geom_point(aes(x = dat[,1], y = dat[,2])) +
+  labs(x = "x1", y = "x2")
+
+```
+
+```{r}
+#パラメータ初期値
+phis = list()
+mus = list()
+sigmas = list()
+phis[[1]] = 0.5
+phis[[2]] = 0.5
+mus[[1]] = c(0, 50.0)
+mus[[2]] = c(0, 100.0)
+sigmas[[1]] = diag(c(1,1),nrow = 2, ncol = 2)
+sigmas[[2]] = diag(c(1,1),nrow = 2, ncol = 2)
+
+K = 2 #潜在変数の次元
+N = nrow(dat) #データ数 
+MAX_ITER = 100
+THRESHOLD = 10^-4
+
+#データ1個当たりのGMM尤度
+GMM = function(x,mus,sigmas,phis)
+{
+  K = length(mus)
+  y = 0
+  for(i in 1:K)
+  {
+    phi = phis[[i]]
+    mu = mus[[i]]
+    sigma = sigmas[[i]]
+    tmp =  phi * dmnorm(x,mean = mu, varcov = sigma,log = FALSE)
+    y = y + tmp
+  }
+  return(y)
+}
+
+#GMMの対数尤度
+GMM_likelihood = function(dat,mus,sigmas,phis)
+{
+  eps = 10^-8
+  L = 0
+  N = nrow(dat)
+  for(i in 1:N)
+  {
+    y = GMM(dat[i,],mus,sigmas,phis)
+    L = L + log(y + eps)
+  }
+  return(L / N)
+}
+
+#EMアルゴリズム
+current_likelihood = GMM_likelihood(dat,mus,sigmas,phis)
+for(iter in 1:MAX_ITER)
+{
+  #E STEP
+  qs = matrix(0, nrow = N, ncol = K)
+  for(n in 1:N)
+  {
+    x = dat[n,]
+    for(k in 1:K)
+    {
+      phi = phis[[k]]
+      mu = mus[[k]]
+      sigma = sigmas[[k]]
+      qs[n,k] = phi * multivariate_normal(x,mu,sigma)
+    }
+      qs[n,] = qs[n,] / rep(GMM(x,mus,sigmas,phis),K)
+  }
+  
+  #M STEP
+  qs_sum = colSums(qs)
+  for(k in 1:K)
+  {
+    #phi更新
+    phis[[k]] = qs_sum[k] / N
+    
+    #mu更新
+    c = 0
+    for(n in 1:N)
+    {
+      c = c + qs[n,k] * dat[n,]
+    }
+    mus[[k]] = c / qs_sum[k]
+    
+    #sigma更新
+    c = 0
+    for(n in 1:N)
+    {
+      z = matrix(dat[n,] - mus[[k]])
+      c = c + qs[n,k] * z %*% t(z)
+    }
+    sigmas[[k]] = c / qs_sum[k]
+  }
+  
+  #終了条件
+  print(paste0("current_likelihood-->",current_likelihood))
+  next_likelihood = GMM_likelihood(dat,mus,sigmas,phis)
+  diff_lik = abs(next_likelihood - current_likelihood)
+  if(diff_lik < THRESHOLD)
+  {
+    print("尤度関数の変化幅が閾値以下になったため終了")
+    break
+  }
+  current_likelihood = next_likelihood
+}
+
+
+print(phis)
+print(mus)
+print(sigmas)
+
+
+library(matrixcalc)
+
+
+```
+
+```{r}
+library(torch)
+
+x = torch_tensor(5.0,requires_grad = TRUE)
+y = 3 * x ** 2
+y$backward()
+print(x$grad)
+
+```
+
+```{r}
+rosenbrock = function(x0,x1)
+{
+  y = 100 * (x1 - x0 ** 2) **2 + (x0 - 1) ** 2
+  return(y)
+}
+
+x0 = torch_tensor(0.0, requires_grad = TRUE)
+x1 = torch_tensor(2.0, requires_grad = TRUE)
+
+y = rosenbrock(x0,x1)
+y$backward()
+x0$grad
+x1$grad
+
+```
+
+```{r}
+
+x0 = torch_tensor(0.0, requires_grad = TRUE)
+x1 = torch_tensor(2.0, requires_grad = TRUE)
+
+lr = 0.001
+iters = 10000
+
+for(i in 1:iters)
+{
+  if(i %% 1000 == 0)
+  {
+    print(paste("x0の更新値-->",x0$item()))
+    print(paste("x1の更新値-->",x1$item()))
+  }
+  
+  y = rosenbrock(x0,x1)
+  y$backward()
+  
+  with_no_grad({
+    #値の更新
+    x0 = x0$sub_(lr * x0$grad)
+    x1 = x1$sub_(lr * x1$grad)
+    
+    # 勾配のリセット
+    x0$grad$zero_()
+    x1$grad$zero_()
+  })
+}
+
+print(x0$item())
+print(x1$item())
+
+```
+
+```{r}
+torch_manual_seed(0)
+x = torch_rand(100,1)
+y = 2 * x + 5 + torch_rand(100,1)
+
+plot(x,y)
+
+W = torch_zeros(c(1,1), requires_grad = T)
+b = torch_zeros(1, requires_grad = T)
+
+predict_lm = function(x)
+{
+  y = x$matmul(W) + b
+  return(y)
+}
+
+MSE = function(x0,x1)
+{
+  dif = x0 - x1
+  N = nrow(dif)
+  return(torch_sum(dif ** 2) / N)
+}
+
+lr = 0.1
+iters = 100
+
+for(i in 1:iters)
+{
+  y_hat = predict_lm(x)
+  loss = MSE(y, y_hat)
+  loss$backward()
+  
+  with_no_grad({
+    #値の更新
+    W = W$sub_(lr * W$grad)
+    b = b$sub_(lr * b$grad)
+    
+    # 勾配のリセット
+    W$grad$zero_()
+    b$grad$zero_()
+  })
+  
+  if(i %% 10 == 0)
+  {
+    print(paste("loss-->",loss$item()))
+  }
+  
+}
+
+paste("W -->",W$item())
+paste("b -->",b$item())
+
+```
+
+```{r}
+torch_manual_seed(0)
+
+#変数設定
+d_in = 1
+d_hidden = 10
+d_out = 1
+learning_rate = 0.2
+loss_history = c()
+
+#データ作成
+x = torch_rand(100, 1)
+y = torch_sin(2*pi*x) + torch_rand(100,1)
+
+#ニューラルネットワークのレイヤー設定
+my_linear <- nn_sequential(
+  nn_linear(d_in, d_hidden),
+  nn_sigmoid(),
+  nn_linear(d_hidden, d_out)
+)
+
+opt <- optim_sgd(my_linear$parameters, lr = learning_rate)
+
+### training loop ----------------------------------------
+
+for (t in 1:10000) {
+  ### -------- Forward pass --------
+  y_pred <- my_linear(x)
+  
+  ### -------- Compute loss -------- 
+  loss <- nnf_mse_loss(y_pred,y)
+  loss_history = c(loss_history,loss$item())
+  if (t %% 1000 == 0)
+  {
+    cat("Epoch: ", t, "   Loss: ", loss$item(), "\n")
+  }
+    
+  ### -------- Backpropagation --------
+  opt$zero_grad()
+  loss$backward()
+  
+  ### -------- Update weights -------- 
+  opt$step()
+}
+
+loss_history = bind_cols(1:10000,loss_history)
+names(loss_history) = c("iter", "losses")
+
+ggplot() + geom_point(aes(as.numeric(x),as.numeric(y))) + geom_line(aes(as.numeric(x),as.numeric(y_pred)), color = "red", linewidth = 2)
+ggplot(loss_history) + geom_line(aes(iter,losses))
+```
+
+```{r}
+#Encoder
+Encoder <- nn_module(
+  initialize = function(input_dim, hidden_dim, latent_dim) {
+    self$linear = nn_linear(input_dim, hidden_dim)
+    self$linear_mu = nn_linear(hidden_dim, latent_dim)
+    self$linear_logvar = nn_linear(hidden_dim, latent_dim)
+  },
+  forward = function(x) {
+    h = self$linear(x)
+    h = nnf_relu(h)
+    mu = self$linear_mu(h)
+    logvar = self$linear_logvar(h)
+    sigma = torch_exp(0.5 * logvar)
+    latent_params = list(mu, sigma)
+    return(latent_params)
+  }
+)
+
+#Decoder
+Decoder <- nn_module(
+  initialize = function(latent_dim, hidden_dim, output_dim) {
+    self$linear_1 = nn_linear(latent_dim, hidden_dim)
+    self$linear_2 = nn_linear(hidden_dim, output_dim)
+  },
+  forward = function(z) {
+    h = self$linear_1(z)
+    h = nnf_relu(h)
+    h = self$linear_2(h)
+    x_hat = nnf_sigmoid(h)
+    return(x_hat)
+  }
+)
+
+#パラメータ推定のためのreparameterize
+reparameterize = function(params){
+  mus = params[[1]]
+  sigmas = params[[2]]
+  
+  eps = torch_randn_like(sigmas)
+  z = mus + eps * sigmas
+  
+  return(z)
+}
+
+#VAE
+VAE <- nn_module(
+  initialize = function(input_dim, hidden_dim, latent_dim) {
+    self$encoder = Encoder(input_dim,hidden_dim,latent_dim)
+    self$decoder = Decoder(latent_dim,hidden_dim,input_dim)
+  },
+  getloss = function(x) {
+    params = self$encoder(x)
+    z = reparameterize(params)
+    x_hat = self$decoder(z)
+    
+    L1 = nnf_mse_loss(x_hat,x, reduction = "sum")
+    L2 = - torch_sum(1 + torch_log(params[[2]] ** 2) - params[[1]] ** 2 - params[[2]] ** 2)
+    return((L1+L2)/batch_size)
+  }
+)
+
+```
+
+```{r}
+library(torchvision)
+
+# ハイパーパラメータの設定
+input_dim = 784
+hidden_dim = 200
+latent_dim = 20
+epochs = 1000
+learning_rate = 3 * 10^-4
+batch_size = 32
+
+ds <- mnist_dataset(
+  root = "./data",
+  train = TRUE, # default
+  download = TRUE,
+  transform = function(x) {
+    y = x %>% transform_to_tensor()
+    y = torch_flatten(y)
+  }
+)
+
+dl <- dataloader(ds, batch_size = batch_size, shuffle = TRUE)
+
+model = VAE(input_dim, hidden_dim, latent_dim)
+optimizer = optim_adam(model$parameters, lr = learning_rate)
+losses = c()
+
+x = dl %>% dataloader_make_iter() %>% dataloader_next()
+for(epoch in 1:epochs){
+  loss_sum = 0
+  cnt = 0
+  
+  for(in_x in 1:batch_size){
+    optimizer$zero_grad()
+    loss = model$getloss(x$x[in_x])
+    loss$backward()
+    optimizer$step()
+    
+    loss_sum = loss_sum + loss$item()
+    cnt = cnt + 1
+  }
+  
+  loss_avg = loss_sum / cnt
+  losses = c(losses, loss_avg)
+  print(loss_avg)
+}
+
+losses_plot = bind_cols(1:epochs,losses)
+names(losses_plot) = c("epochs", "losses")
+ggplot(losses_plot) + geom_line(aes(x=epochs, y=losses))
+
+```
+
+```{r}
+library(imager)
+
+# moto = dl %>% dataloader_make_iter() %>% dataloader_next()
+# test = moto$x[1]$view(c(sample_size,28,28))
+# 
+# tmp = test %>% as.array()
+# tmp_min = min(tmp)
+# tmp_max = max(tmp)
+# tmp = (tmp - tmp_min) / tmp_max
+# as.cimg(t(tmp[1,,])) %>% plot(main = "元データ")
+
+plot_list = list()
+for(i in 1:16){
+  with_no_grad({
+    sample_size = 1
+    z = torch_randn(sample_size, latent_dim)
+    x = model$decoder(z)
+    generated_images = x$view(c(sample_size,28, 28))
+  })
+  
+  tmp = generated_images %>% as.array()
+  tmp_min = min(tmp)
+  tmp_max = max(tmp)
+  tmp = (tmp - tmp_min) / tmp_max
+  # plot_list[[i]] = as.cimg(t(tmp[1,,]))
+  plot_list[[i]] = tmp
+}
+
+par(mfrow = c(4,4))
+for(i in 1:16){
+  plot(plot_list[[i]])
+}
+
+rasterize = function(x){
+  as.raster(x[1,,])
+}
+
+plot_list %>% map(rasterize) %>% walk(~{plot(.x)})
+```
+
+```{r}
+
+#拡散モデル
+ConvBlock <- nn_module(
+  initialize = function(in_dim,out_dim,time_embed_dim) {
+    self$conv = nn_sequential(
+      nn_conv2d(in_dim,out_dim,3,padding = 1),
+      nn_batch_norm2d(out_dim),
+      nn_relu(),
+      nn_conv2d(out_dim,out_dim,3,padding = 1),
+      nn_batch_norm2d(out_dim),
+      nn_relu()
+    )
+    self$mlp = nn_sequential(
+      nn_linear(time_embed_dim, in_dim),
+      nn_relu(),
+      nn_linear(in_dim,in_dim)
+    )
+  },
+  forward = function(x,v) {
+    shape = x$shape
+    v = self$mlp(v)
+    v = v$reshape(c(shape[1], shape[2], 1, 1))
+    return(self$conv(x+v))
+  }
+)
+
+UNet <- nn_module(
+  initialize = function(in_dim=1, time_embed_dim = 100) {
+    self$time_embed_dim = time_embed_dim
+    
+    self$down1 = ConvBlock(in_dim,64,time_embed_dim)
+    self$down2 = ConvBlock(64,128,time_embed_dim)
+    self$bot1 = ConvBlock(128,256,time_embed_dim)
+    self$up2 = ConvBlock(128+256,128,time_embed_dim)
+    self$up1 = ConvBlock(128+64,64,time_embed_dim)
+    self$out = nn_conv2d(64,in_dim, 1)
+    
+    self$maxpool = nn_max_pool2d(2)
+    self$upsample = nn_upsample(scale_factor = 2, mode = "bilinear")
+  },
+  forward = function(x, timesteps) {
+    v = pos_encoding(timesteps, self$time_embed_dim, x$device)
+    
+    x1 = self$down1(x,v)
+    x = self$maxpool(x1)
+    x2 = self$down2(x,v)
+    x = self$maxpool(x2)
+    x = self$bot1(x,v)
+    
+    x = self$upsample(x)
+    x = torch_cat(c(x,x2),dim = 2)
+    x = self$up2(x,v)
+    x = self$upsample(x)
+    x = torch_cat(c(x,x1), dim = 2)
+    x = self$up1(x,v)
+    x = self$out(x)
+    return(x)
+  }
+)
+
+```
+
+```{r}
+
+pos_encoding_t = function(t, out_dim, device = "cpu"){
+  D = out_dim
+  v = torch_zeros(D, device = device)
+  
+  i = torch_arange(0,D,device = device)
+  div_term = 10000 ** (i/D)
+  
+  v[seq(2,D,2)] = torch_sin(t / div_term[seq(2,D,2)])
+  v[seq(1,D,2)] = torch_cos(t / div_term[seq(1,D,2)])
+  
+  return(v)
+}
+
+pos_encoding = function(ts, out_dim, device = "cpu"){
+  batch_size = length(ts)
+  v = torch_zeros(batch_size, out_dim, device = device)
+  for(i in 1:batch_size){
+    v[i] = pos_encoding_t(ts[i], out_dim, device)
+  }
+  return(v)
+}
+
+
+```
+
+```{r}
+
+x = torch_randn(c(3,64,64))
+MAX_T = 1000
+betas = torch_linspace(0.0001, 0.02, MAX_T)
+
+for(t in 1:MAX_T){
+  beta = betas[t]
+  eps = torch_randn_like(x)
+  x = torch_sqrt(1-beta) * x + torch_sqrt(beta) * eps
+}
+
+```
+
+```{r}
+library(imager)
+
+img = load.image("./data/image.png")
+plot(img,axes = FALSE)
+img %>% dim()
+
+cimg2tensor = function(img, iscolor = T){
+  img_array = img %>% as.array()
+  img_dim = dim(img_array)
+  color_dim = ifelse(iscolor,3,1)
+  tmp = array(NA,dim = c(img_dim[1],img_dim[2],color_dim))
+  tmp[,,1:color_dim] = img_array[,,1,1:color_dim]
+  tmp[1:img_dim[1],,] = img_array[1:img_dim[1],,1,]
+  tmp[,1:img_dim[2],] = img_array[,1:img_dim[2],1,]
+  out = torch_tensor(tmp)
+  return(out)
+}
+
+tensor2cimg = function(tensor, iscolor = T){
+  tensor = tensor * 255
+  tensor = tensor$clamp(0,255)
+  tensor = tensor/ 255
+  tensor_array = tensor %>% as.array()
+  tensor_dim = dim(tensor_array)
+  color_dim = ifelse(iscolor,3,1)
+  tmp = array(NA,dim = c(tensor_dim[1],tensor_dim[2],1,color_dim))
+  tmp[,,1,1:color_dim] = tensor_array[,,1:color_dim]
+  tmp[1:tensor_dim[1],,1,] = tensor_array[1:tensor_dim[1],,]
+  tmp[,1:tensor_dim[2],1,] = tensor_array[,1:tensor_dim[2],]
+  out = as.cimg(tmp)
+  return(out)
+}
+
+```
+
+```{r}
+x = cimg2tensor(img)
+MAX_T = 1000
+betas = torch_linspace(0.0001, 0.02, MAX_T)
+plot_list = list()
+plot_num = 1
+
+for(t in 1:MAX_T){
+  if(t %% 100 == 0){
+    img = tensor2cimg(x)
+    plot_list[[plot_num]] = img
+    plot_num = plot_num + 1
+  }
+  
+  beta = betas[t]
+  eps = torch_randn_like(x)
+  x = torch_sqrt(1-beta) * x + torch_sqrt(beta) * eps
+}
+
+```
+
+```{r}
+#描写
+par(mfrow=c(2,5))
+par(oma = c(1, 1, 1, 1))
+for(i in 1:10){
+  plot_list[[i]] %>% plot(axes = FALSE, main = paste("t =", i*100))
+}
+
+```
+
+```{r}
+x = torch_tensor(c(1,2,3,4))
+output = torch_cumprod(x, dim = 0)
+print(output)
+```
+
+```{r}
+beta_start = 0.0001
+beta_end = 0.02
+MAX_T = 1000
+betas = torch_linspace(beta_start,beta_end,MAX_T)
+
+add_noise = function(x_0,t,betas){
+  MAX_T = length(betas)
+  if(!(t>=1 & t<=MAX_T)){
+    stop("ERROR\n") 
+  }else{
+    alphas = 1 - betas
+    alpha_bars = torch_cumprod(alphas, dim = 1)
+    alpha_bar = alpha_bars[t]
+    
+    eps = torch_randn_like(x_0)
+    x_t = torch_sqrt(alpha_bar) * x_0 + torch_sqrt(1 - alpha_bar) * eps
+  }
+  return(x_t)
+}
+```
+
+```{r}
+tmp = add_noise(x,100,betas)
+tmp = tensor2cimg(tmp)
+plot(tmp)
+```
+
+```{r}
+Diffuser <- nn_module(
+  initialize = function(num_timesteps=1000, betas_start=0.0001, beta_end=0.02, device = "cpu") {
+    self$num_timesteps = num_timesteps
+    self$device = device
+    self$betas = torch_linspace(betas_start,beta_end,num_timesteps,device = device)
+    self$alphas = 1 - self$betas
+    self$alpha_bars = torch_cumprod(self$alphas, dim=1)
+  },
+  add_noise = function(x_0,t){
+    MAX_T = length(self$num_timesteps)
+    alpha_bar = self$alpha_bars[t %>% as.array()]
+    N = alpha_bar$size(1)
+    alpha_bar = alpha_bar$view(c(N,1,1,1))
+    
+    noise = torch_randn_like(x_0,device = self$device)
+    x_t = torch_sqrt(alpha_bar) * x_0 + torch_sqrt(1 - alpha_bar) * noise
+    return(list(x_t,noise))
+  },
+  denoise = function(model,x,t) {
+    MAX_T = self$num_timesteps
+    alpha = self$alphas[t %>% as.array()]
+    alpha_bar = self$alpha_bars[t %>% as.array()]
+    alpha_bar_prev = self$alpha_bars[(t-1) %>% as.array()]
+    
+    N = alpha_bar$size(1)
+    alpha = alpha$view(c(N,1,1,1))
+    alpha_bar = alpha_bar$view(c(N,1,1,1))
+    alpha_bar_prev = alpha_bar_prev$view(c(N,1,1,1))
+    
+    model$eval()
+    with_no_grad({
+      eps = model(x,t)
+      model$train()
+      
+      noise = torch_randn_like(x, device = self$device)
+      noise[t == 2] = 0
+      
+      mu = (x -((1-alpha) / torch_sqrt(1-alpha_bar)) * eps) / torch_sqrt(alpha)
+      std = torch_sqrt((1-alpha) * (1-alpha_bar_prev) / (1-alpha_bar))
+      return(mu + noise * std)
+    })
+  },
+  reverse_to_img = function(x, iscolor = F) {
+      tensor = x * 255
+      tensor = tensor$clamp(0,255)
+      tensor = tensor/ 255
+      tensor_array = tensor %>% as.array()
+      tensor_dim = dim(tensor_array)
+      color_dim = ifelse(iscolor,3,1)
+
+      out = list()
+      for(i in 1:tensor_dim[1]){
+        tmp = array(NA,dim = c(tensor_dim[3],tensor_dim[4],1,color_dim))
+        tmp[,,1,1:color_dim] = tensor_array[i,1:color_dim,,]
+        tmp[1:tensor_dim[3],,1,] = tensor_array[i,,1:tensor_dim[3],]
+        tmp[,1:tensor_dim[4],1,] = tensor_array[i,,,1:tensor_dim[4]]
+        out[[i]] = as.cimg(tmp)
+      }
+      return(out)
+  },
+      make_sample = function(model, x_shape = c(20,1,28,28)){
+        batch_size = x_shape[1]
+        x = torch_randn(x_shape, device = self$device)
+
+        for(i in self$num_timesteps:2){
+          t = torch_tensor(rep(i,batch_size), device = self$device, dtype = torch_long())
+          x = diffuser$denoise(model, x, t)
+        }
+
+      images = list()
+      for(i in 1:batch_size){
+        images = append(images,x)
+      }
+      return(images)
+  }
+)
+```
+
+```{r}
+library(torchvision)
+
+img_size = 28
+batch_size = 128
+num_timesteps = 1000
+epochs = 100
+lr = 10^-3
+device = ifelse(cuda_is_available(),"cuda","cpu")
+
+ds <- mnist_dataset(
+  root = "./data",
+  train = TRUE, # default
+  download = TRUE,
+  transform = function(x) {
+    y = x %>% transform_to_tensor()
+  }
+)
+
+dl <- dataloader(ds, batch_size = batch_size, shuffle = TRUE)
+
+diffuser = Diffuser(num_timesteps,device = device)
+model = UNet()
+optimizer = optim_adam(model$parameters, lr=lr)
+```
+
+```{r}
+losses = c()
+for(epoch in 1:epochs){
+  loss_sum = 0.0
+  cnt = 0
+  
+  coro::loop(for(img in dl){
+    optimizer$zero_grad()
+    x = img$x
+    shape = x$shape
+    t = torch_randint(1, num_timesteps,shape[1],device = device)
+    
+    x_noisy = diffuser$add_noise(x,t)
+    noise_pred = model(x_noisy[[1]],t)
+    loss = nnf_mse_loss(x_noisy[[2]],noise_pred,reduction = "sum")
+    
+    loss$backward()
+    optimizer$step()
+    
+    loss_sum = loss_sum + loss$item()
+    cnt = cnt + 1
+  })
+  
+  loss_avg = loss_sum / cnt
+  losses = c(losses, loss_avg)
+  cat("Epoch: ",epoch,"| Loss: ", loss_avg)
+}
+```
